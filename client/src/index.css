@@ -1,0 +1,248 @@
+:root {
+  /* Design System Palette */
+  --bg-cream: #F6F2E9;
+  --bg-cream-dark: #EFE9DC;
+  --primary-cobalt: #3049C7;
+  --primary-cobalt-hover: #2237A4;
+  --primary-cobalt-light: #EBF0FF;
+  --secondary-pink: #DDAEB4;
+  --secondary-pink-light: #FBECEF;
+  --accent-lavender: #E9DDF5;
+  --accent-yellow: #FFE36E;
+  --accent-mint: #D4F4E2;
+  --dark-text: #171717;
+  --muted-text: #6E6A63;
+  --light-muted: #A39F97;
+  --card-white: #FFFFFF;
+  --border-dark: #171717;
+  --border-subtle: #E3DED4;
+  --sidebar-dark: #221F35;
+  --sidebar-active: #353052;
+  --sidebar-text: #DDD7F0;
+  
+  /* Typography */
+  --font-display: 'Syne', sans-serif;
+  --font-body: 'Plus Jakarta Sans', sans-serif;
+  
+  /* Radii */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --radius-pill: 9999px;
+  
+  /* Shadows */
+  --shadow-neo-sm: 2px 2px 0px var(--border-dark);
+  --shadow-neo: 4px 4px 0px var(--border-dark);
+  --shadow-neo-lg: 6px 6px 0px var(--border-dark);
+  --shadow-soft: 0 12px 32px -8px rgba(23, 23, 23, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  background-color: var(--bg-cream);
+  color: var(--dark-text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  width: 100%;
+}
+
+/* Typography Utilities */
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+.text-editorial-xl {
+  font-family: var(--font-display);
+  font-size: clamp(2.4rem, 5vw, 4.2rem);
+  font-weight: 800;
+  line-height: 0.95;
+  text-transform: uppercase;
+  letter-spacing: -0.03em;
+}
+
+.text-editorial-lg {
+  font-family: var(--font-display);
+  font-size: clamp(1.8rem, 3.5vw, 2.6rem);
+  font-weight: 800;
+  line-height: 1.05;
+  text-transform: uppercase;
+  letter-spacing: -0.02em;
+}
+
+.text-editorial-md {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: -0.01em;
+}
+
+/* Neo-Editorial Component Classes */
+.card-neo {
+  background: var(--card-white);
+  border: 2px solid var(--border-dark);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-neo);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.card-neo-hover:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-neo-lg);
+}
+
+.badge-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1.5px solid var(--border-dark);
+}
+
+.badge-yellow {
+  background-color: var(--accent-yellow);
+  color: var(--dark-text);
+}
+
+.badge-pink {
+  background-color: var(--secondary-pink);
+  color: var(--dark-text);
+}
+
+.badge-lavender {
+  background-color: var(--accent-lavender);
+  color: var(--dark-text);
+}
+
+.badge-mint {
+  background-color: var(--accent-mint);
+  color: var(--dark-text);
+}
+
+.badge-cobalt {
+  background-color: var(--primary-cobalt);
+  color: #FFFFFF;
+  border-color: var(--primary-cobalt);
+}
+
+/* Button Utilities */
+.btn-neo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  border: 2px solid var(--border-dark);
+  box-shadow: var(--shadow-neo-sm);
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-neo:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-neo);
+}
+
+.btn-neo:active:not(:disabled) {
+  transform: translate(0px, 0px);
+  box-shadow: none;
+}
+
+.btn-neo:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-cobalt {
+  background-color: var(--primary-cobalt);
+  color: #FFFFFF;
+}
+
+.btn-yellow {
+  background-color: var(--accent-yellow);
+  color: var(--dark-text);
+}
+
+.btn-white {
+  background-color: var(--card-white);
+  color: var(--dark-text);
+}
+
+.btn-dark {
+  background-color: var(--border-dark);
+  color: #FFFFFF;
+}
+
+/* Input Fields */
+.input-neo {
+  width: 100%;
+  padding: 12px 16px;
+  background-color: #FFFFFF;
+  border: 2px solid var(--border-dark);
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  color: var(--dark-text);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.input-neo:focus {
+  border-color: var(--primary-cobalt);
+  box-shadow: 0 0 0 3px rgba(48, 73, 199, 0.15);
+}
+
+/* Circular Seal/Stamp Graphic */
+.seal-rotate {
+  animation: rotate 20s linear infinite;
+}
+
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-cream);
+}
+::-webkit-scrollbar-thumb {
+  background: #D5CEC2;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #BBB3A6;
+}
