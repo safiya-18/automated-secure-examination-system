@@ -1,7 +1,7 @@
 # Phase 03: Authentication & Role-Based Access Control - User Acceptance Testing (UAT)
 
-**Status:** Completed & Verified  
-**Date:** 2026-11-05  
+**Status:** Completed & Verified
+**Date:** 2026-11-05
 
 ## Test Scenarios & Results
 
@@ -39,4 +39,3 @@
 - **Scenario:** Submitting a CSV batch containing valid students and duplicate entries.
 - **Expected:** Valid students are registered; duplicate entries are captured in `skippedDetails` without aborting the batch.
 - **Result:** PASS.
-
