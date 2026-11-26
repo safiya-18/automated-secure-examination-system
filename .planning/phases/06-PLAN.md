@@ -1,8 +1,8 @@
 # Phase 06: Examination Attempt Engine & Persistent Results Integration - Implementation Plan
 
-**Phase Number:** 06  
-**Status:** Planned (Ready for Implementation)  
-**Target:** Student Exam Attempt Engine, Server-Side Timer & Grace Enforcement, Real-Time Answer Saving, Automatic Objective Evaluation, Telemetry Logging, Faculty Results Analytics, and Frontend Integration  
+**Phase Number:** 06
+**Status:** Planned (Ready for Implementation)
+**Target:** Student Exam Attempt Engine, Server-Side Timer & Grace Enforcement, Real-Time Answer Saving, Automatic Objective Evaluation, Telemetry Logging, Faculty Results Analytics, and Frontend Integration
 
 ---
 
@@ -51,6 +51,7 @@ From Graphify AST analysis:
   * `server/src/controllers/examController.js` — Student exam logic (verification, allocation, auto-save, evaluation, malpractice logging).
   * `server/src/controllers/resultsController.js` — Faculty quiz results and deep attempt inspection.
   * `server/src/middleware/examSessionMiddleware.js` — Validates ephemeral exam session token and server expiration window.
+  * `server/src/utils/evaluationService.js` — Reusable, atomic server-side evaluation & finalization engine (shared by Task 2 expired attempt handling and Task 4 submission/telemetry finalization).
   * `server/src/utils/testExamEngine.js` — Automated integration test suite covering end-to-end exam lifecycle.
 
 ---
@@ -58,16 +59,20 @@ From Graphify AST analysis:
 ## 3. Schema Modifications (Safe & Backward Compatible)
 
 ### `server/src/models/Attempt.js`
-Preserve existing schema and status enum. Add non-breaking fields:
+Preserve existing schema and status enum. Non-breaking fields:
 ```js
 // Added to attemptSchema:
 submissionReason: {
   type: String,
-  enum: ['student-submit', 'timer-expiry', 'proctor-terminated'],
-  default: 'student-submit',
+  enum: {
+    values: ['student-submit', 'timer-expiry', 'proctor-terminated'],
+    message: '{VALUE} is not a valid submission reason',
+  },
+  default: null, // Critical: in-progress attempts are NEVER initialized with 'student-submit'
 },
-sessionToken: {
+sessionTokenHash: {
   type: String,
+  default: null,
   select: false,
 },
 ```
@@ -85,39 +90,155 @@ sessionToken: {
   * `server/src/middleware/examSessionMiddleware.js`
   * `server/src/utils/testExamSessionMiddleware.js`
 * **Implementation:**
-  * Added `submissionReason` enum (`['student-submit', 'timer-expiry', 'proctor-terminated']`, default `'student-submit'`) while preserving all original `status` enum values (`'in-progress'`, `'completed'`, `'terminated-malpractice'`).
+  * Added `submissionReason` enum (`['student-submit', 'timer-expiry', 'proctor-terminated']`) while preserving all original `status` enum values (`'in-progress'`, `'completed'`, `'terminated-malpractice'`).
   * Added `sessionTokenHash` (`select: false`, SHA-256) and updated `Attempt.prototype.toJSON()` to exclude token hashes from API serialization.
   * Created `server/src/utils/examToken.js` containing `generateExamSessionToken`, `verifyExamSessionToken`, `hashSessionToken`, and `calculateExamExpiry` (`Math.min(attempt.startTime + quiz.duration, quiz.endTime)`).
   * Created `server/src/middleware/examSessionMiddleware.js` providing `verifyExamSession` with signature verification, attemptId/studentId/quizId matching, status checks, hash invalidation, and server timing calculation.
   * Verified with 45 unit/integration test assertions in `server/src/utils/testExamSessionMiddleware.js` (45 passed, 0 failed) and zero regression across existing suites (283+ tests passing).
 
 #### Task 2: Student Exam Controller — Public Info & Verify-Start
-* **Files:**
-  * `server/src/controllers/examController.js`
-  * `server/src/routes/examRoutes.js`
+* **Files & Implementation Dependencies:**
+  * `server/src/models/Attempt.js` (ensure `submissionReason` default is `null` so in-progress attempts never carry `'student-submit'`)
+  * `server/src/utils/evaluationService.js` (**Explicit Implementation Dependency**: reusable server-side evaluation & finalization engine implemented upfront before `examController.js` so that expired attempt finalization is fully implemented and coordinated with Task 4 without temporary stubs)
+  * `server/src/controllers/examController.js` (new controller module)
+  * `server/src/routes/examRoutes.js` (new routes module)
+  * `server/src/app.js` (mount `/api/exams`)
+  * `server/src/utils/testExamEntry.js` (focused automated test suite)
+  * `server/package.json` (add `test:exam:entry` test script)
 * **Implementation:**
-  * `GET /api/exams/:quizId/public-info`:
-    * Returns public quiz metadata: title, description, duration, totalMarks, questionsPerStudent, startTime, endTime.
-    * Rejects if quiz is not found or `status !== 'published'`.
-    * **Zero questions or answer keys exposed.**
-  * `POST /api/exams/:quizId/verify-start`:
-    * Input: `{ usn, studentName }`.
-    * Normalized lookup: find active student in `User` collection by `usn`.
-    * Verifies student name matches registered name (case-insensitive trim).
-    * Verifies quiz availability window: `now >= quiz.startTime && now <= quiz.endTime`.
-    * Verifies attempt quota: counts existing attempts for `(studentId, quizId)`.
-    * **Resumption Check:** If an attempt with `status === 'in-progress'` exists:
-      * Resumes existing attempt.
-      * Loads assigned questions using `attempt.assignedQuestionOrder`.
-      * Projects questions using `sanitizeQuestionsForStudent()`.
-      * Generates a refreshed ephemeral session token.
-      * Returns sanitized questions + saved answers (`submittedAnswers`) + remaining time.
-    * **New Allocation:** If no active attempt and quota remains:
-      * Fetches question pool for quiz.
-      * Calls `quizService.generateStudentExamAllocation(quiz, allQuestions)`.
-      * Creates `Attempt` record with `assignedQuestionOrder`, `assignedOptionOrder`, and `totalMarksPossible`.
-      * Issues ephemeral session token with expiry set to `examExpiresAt + 5min`.
-      * Returns sanitized questions + initial state.
+  * **1. Explicit Dependency Implementation: Reusable Finalizer (`evaluationService.js`)**:
+    * Implements `evaluateAndFinalizeAttempt(attemptId, { submissionReason = 'timer-expiry', finalizedAt = new Date() })`:
+      * Concurrency & Idempotency: Atomically queries and locks the attempt with `{ _id: attemptId, status: 'in-progress' }`. If the attempt is already completed/terminated, returns the existing record immediately without re-evaluation.
+      * Loads assigned questions for the attempt with `.select('+correctOptionId')`.
+      * Evaluates previously saved answers in `attempt.submittedAnswers` against `correctOptionId`:
+        * Exact match: `isCorrect = true`, `marksAwarded = question.marks`.
+        * Blank or mismatch: `isCorrect = false`, `marksAwarded = 0`.
+      * Evaluates missing/unanswered questions: `isCorrect = false`, `marksAwarded = 0`.
+      * Computes `score = sum(marksAwarded)` and `percentage = Math.round((score / totalMarksPossible) * 100)`.
+      * Saves final evaluation: updates `score`, `percentage`, sets `status = 'completed'`, sets `submissionReason = 'timer-expiry'` (or supplied reason), sets `submittedAt = finalizedAt`, and clears `sessionTokenHash = null`.
+      * Shared and reused directly by Task 4 for `POST /api/exams/attempts/:attemptId/submit` and proctoring auto-submission.
+  * **2. GET `/api/exams/:quizId/public-info`**:
+    * Route: `GET /api/exams/:quizId/public-info`
+    * Param validation: `quizId` must be a valid MongoDB ObjectId.
+    * Checks:
+      * Finds Quiz by `_id`. Rejects with HTTP 404 if not found.
+      * Rejects with HTTP 403 if `quiz.status !== 'published'` (`'Quiz is not published or open for examination'`).
+    * Window status flags:
+      * `now = new Date()`
+      * `isOpen = now >= quiz.startTime && now <= quiz.endTime`
+      * `isUpcoming = now < quiz.startTime`
+      * `isClosed = now > quiz.endTime`
+    * Response: `{ success: true, data: { _id, title, description, duration, totalMarks, questionsPerStudent, startTime, endTime, maxAttempts, isOpen, isUpcoming, isClosed } }`.
+    * **Zero answer-key or question leak:** Exposes strictly public metadata; no questions, options, or faculty details.
+  * **3. POST `/api/exams/:quizId/verify-start`**:
+    * Route: `POST /api/exams/:quizId/verify-start`
+    * Body validation: `usn` (non-empty string), `studentName` (non-empty string).
+    * Param validation: `quizId` (valid MongoDB ObjectId).
+    * **Step A: Student Identity Verification & Anti-Enumeration:**
+      * Normalizes input: `normalizedUsn = usn.trim().toUpperCase()`.
+      * Queries `User.findOne({ usn: normalizedUsn, role: 'student' })`.
+      * Verifies `student.accountStatus === 'active'` (verified against actual `accountStatus` enum in `User.js`).
+      * Normalizes names: `norm(name) = name.trim().toLowerCase().replace(/\s+/g, ' ')`.
+      * Enforces full complete name match: `norm(student.name) === norm(studentName)`.
+      * **Generic Failure Response:** If student not found, `accountStatus !== 'active'`, or name does not match, returns the exact same HTTP 401 response: `{ success: false, message: 'Invalid USN or student name' }`. Strictly prevents USN probing or account status discovery.
+    * **Step B: Quiz Existence & Publication Check:**
+      * Queries `Quiz.findById(quizId)`. Rejects with HTTP 404 if missing.
+      * Rejects with HTTP 403 if `quiz.status !== 'published'`.
+    * **Step C: Existing In-Progress Attempt Check (BEFORE Availability Window):**
+      * Queries existing attempts: `existingAttempts = await Attempt.find({ studentId: student._id, quizId: quiz._id })`.
+      * Finds active attempt: `activeAttempt = existingAttempts.find(a => a.status === 'in-progress')`.
+      * **Branch 1: In-Progress Attempt Exists (Resumption Path):**
+        * Authoritative expiry: `examExpiresAt = calculateExamExpiry(activeAttempt.startTime, quiz.duration, quiz.endTime)`.
+        * **Resumption Beyond Quiz Window Rule:** Resumption is permitted within authoritative `examExpiresAt + 60_000` (submission grace period), even if `quiz.endTime` has already passed.
+        * **Expired Attempt Finalization & Evaluation (Coordinated with Task 4):**
+          * If `Date.now() > examExpiresAt.getTime() + 60_000`:
+            * An expired attempt must **never** be marked completed without evaluation.
+            * Calls reusable `evaluateAndFinalizeAttempt(activeAttempt._id, { submissionReason: 'timer-expiry', finalizedAt: new Date(examExpiresAt.getTime() + 60_000) })` from `server/src/utils/evaluationService.js`.
+            * Computes score and percentage from saved answers, updates attempt atomically, clears session token hash, and returns HTTP 403: `{ success: false, message: 'Examination time has expired. This attempt has been evaluated and closed.' }`.
+            * Guarantees expired attempts never remain indefinitely stuck as `in-progress`.
+        * **Active In-Time Resumption:**
+          * If `Date.now() <= examExpiresAt.getTime() + 60_000`:
+            * Computes remaining editing seconds: `remainingEditSeconds = Math.max(0, Math.floor((examExpiresAt.getTime() - Date.now()) / 1000))`.
+            * Note: If `Date.now() > examExpiresAt.getTime()`, `remainingEditSeconds = 0` (answers cannot be edited after `examExpiresAt`, strictly within the 60s transmission grace window).
+            * Loads all questions for quiz.
+            * Strictly preserves original question order (`activeAttempt.assignedQuestionOrder`), option order (`activeAttempt.assignedOptionOrder`), and saved answers (`activeAttempt.submittedAnswers`).
+            * Sanitizes questions via `quizService.sanitizeQuestionsForStudent(questions, activeAttempt.assignedQuestionOrder, activeAttempt.assignedOptionOrder)`.
+            * Issues refreshed ephemeral session token expiring at `new Date(examExpiresAt.getTime() + 60_000)` (authoritative 60-second grace window).
+            * Updates `activeAttempt.sessionTokenHash = tokenHash` (invalidates older tab sessions) and saves.
+            * Returns `{ success: true, resumed: true, attemptId: activeAttempt._id, sessionToken: token, expiresAt: examExpiresAt, remainingSeconds: remainingEditSeconds, questions: sanitizedQuestions, submittedAnswers: activeAttempt.submittedAnswers }`.
+      * **Branch 2: No Active Attempt Exists (New Attempt Path):**
+        * **Strict Availability Window Enforcement:**
+          * ONLY checked when starting a new attempt.
+          * `const now = new Date();`
+          * If `now < quiz.startTime || now > quiz.endTime`:
+            * Returns HTTP 403: `{ success: false, message: 'Examination window is not active. New attempts cannot be started outside the scheduled window.' }`.
+            * **Invariant:** Never allows a new attempt to start outside the quiz availability window.
+        * **Attempt Numbering & Quota Enforcement:**
+          * Calculates maximum existing attempt number:
+            `maxAttemptNumber = existingAttempts.reduce((max, a) => Math.max(max, a.attemptNumber || 0), 0)`.
+          * Calculates next attempt number: `nextAttemptNumber = maxAttemptNumber + 1`.
+          * Enforces `maxAttempts`: If `existingAttempts.length >= quiz.maxAttempts` or `maxAttemptNumber >= quiz.maxAttempts`:
+            * Returns HTTP 403: `{ success: false, message: 'Maximum attempt limit reached. You cannot start a new attempt.' }`.
+        * **Question Allocation & Invariants:**
+          * Fetches quiz question bank. Validates question bank is non-empty and has enough questions for `quiz.questionsPerStudent`.
+          * Calls `quizService.generateStudentExamAllocation(quiz, allQuestions)`.
+          * Computes authoritative expiry: `startTime = new Date()`, `examExpiresAt = calculateExamExpiry(startTime, quiz.duration, quiz.endTime)`.
+          * Creates `Attempt`:
+            * `studentId: student._id`
+            * `quizId: quiz._id`
+            * `attemptNumber: nextAttemptNumber`
+            * `assignedQuestionOrder: allocation.assignedQuestionOrder`
+            * `assignedOptionOrder: allocation.assignedOptionOrder`
+            * `totalMarksPossible: allocation.totalMarksPossible`
+            * `startTime`
+            * `status: 'in-progress'`
+            * `submissionReason: null` (CRITICAL: never initialized to `'student-submit'`)
+            * `submittedAnswers: []`
+          * Issues ephemeral session token expiring at `new Date(examExpiresAt.getTime() + 60_000)` (authoritative 60-second grace window).
+          * Sets `newAttempt.sessionTokenHash = tokenHash`.
+          * **Concurrency & Duplicate-Key Recovery:**
+            * Saves with try-catch. If duplicate key collision occurs on compound index `{ studentId: 1, quizId: 1, attemptNumber: 1 }` (Mongo error `11000` from rapid double-clicks):
+              * Catches collision, queries the newly created active attempt, and resumes it cleanly instead of throwing an unhandled error.
+          * Sanitizes questions via `quizService.sanitizeQuestionsForStudent(allQuestions, newAttempt.assignedQuestionOrder, newAttempt.assignedOptionOrder)`.
+          * **Zero Answer-Key Exposure:** Guarantees `correctOptionId` is completely quarantined from the returned response.
+          * Returns `{ success: true, resumed: false, attemptId: newAttempt._id, sessionToken: token, expiresAt: examExpiresAt, remainingSeconds: Math.floor((examExpiresAt.getTime() - startTime.getTime()) / 1000), questions: sanitizedQuestions, submittedAnswers: [] }`.
+  * **4. Routes & App Wiring**:
+    * `server/src/routes/examRoutes.js`: Exposes `/public-info` and `/verify-start`.
+    * `server/src/app.js`: Mounts `app.use('/api/exams', examRoutes);`.
+  * **5. Comprehensive Integration Tests (`server/src/utils/testExamEntry.js`)**:
+    * Public Info endpoint:
+      * Valid quiz returns sanitized metadata.
+      * Draft / Archived quiz returns HTTP 403.
+      * Invalid/missing quizId returns HTTP 404 / 400.
+      * Asserts zero questions or correct answers in public-info payload.
+    * Identity verification:
+      * Unknown USN returns generic HTTP 401 (`"Invalid USN or student name"`).
+      * Name mismatch returns generic HTTP 401 (`"Invalid USN or student name"`).
+      * Inactive student account returns generic HTTP 401 (`"Invalid USN or student name"`).
+      * Whitespace-tolerant, case-insensitive normalized matching name succeeds.
+    * Resumption before Availability Check:
+      * In-progress attempt resumes successfully even after `quiz.endTime` has passed, provided `now <= examExpiresAt + 60s`.
+      * Resumption after `examExpiresAt` reflects `remainingSeconds: 0` (no answer edits permitted).
+    * Timing & Quota validation for New Attempts:
+      * New attempt before `startTime` returns HTTP 403.
+      * New attempt after `endTime` returns HTTP 403.
+      * Student exceeding `maxAttempts` returns HTTP 403.
+    * New Attempt Creation & Numbering:
+      * `attemptNumber` uses `max(attemptNumber) + 1`.
+      * `status` is `'in-progress'`, `submissionReason` is `null` (not `'student-submit'`).
+      * Session token expires at `examExpiresAt + 60_000`.
+      * `sessionTokenHash` is stored on Attempt (and omitted from JSON serialization).
+    * Resumption & Reconnection:
+      * Re-calling `verify-start` while in-progress returns `resumed: true`.
+      * Preserves exact `assignedQuestionOrder`, `assignedOptionOrder`, and `submittedAnswers`.
+      * Replaces `sessionTokenHash` with fresh token.
+    * Expired Attempt Evaluation & Finalization:
+      * Resuming an attempt past `examExpiresAt + 60s` triggers `evaluateAndFinalizeAttempt`, computing score/percentage from saved answers, setting `status = 'completed'`, `submissionReason = 'timer-expiry'`, invalidating session token, and rejecting with HTTP 403.
+      * Finalization is idempotent against repeated or concurrent requests.
+    * Concurrency & Collision Resilience:
+      * Simulates concurrent creation, catches code 11000, returns resumed attempt.
+    * Answer Key Quarantine:
+      * Deep scan of JSON responses asserts `correctOptionId` is 100% absent.
 
 #### Task 3: Real-Time Answer Saving & Strict Timer Cutoff
 * **Files:**
@@ -126,9 +247,10 @@ sessionToken: {
   * `PATCH /api/exams/attempts/:attemptId/answers`:
     * Protected by `verifyExamSession`.
     * Server Timer Hard Cutoff:
-      * Computes `examExpiresAt = attempt.startTime.getTime() + (quiz.duration * 60 * 1000)`.
-      * If `Date.now() > examExpiresAt`:
+      * Computes `examExpiresAt = calculateExamExpiry(attempt.startTime, quiz.duration, quiz.endTime)`.
+      * If `Date.now() > examExpiresAt.getTime()`:
         * Rejects answer save with HTTP 403: `"Examination time has expired. Answer editing is closed."`
+        * Notice: The 60-second grace window applies strictly to final submission transmission (`POST /submit`), **never** to answer editing.
     * Validates `{ questionId, selectedOptionId }`:
       * Ensures `questionId` is within `attempt.assignedQuestionOrder`.
       * Finds question; ensures `selectedOptionId` exists in `question.options`.
@@ -138,6 +260,7 @@ sessionToken: {
 
 #### Task 4: Submission Controller, Automatic Evaluation & Focus Telemetry
 * **Files:**
+  * `server/src/utils/evaluationService.js` (shared with Task 2)
   * `server/src/controllers/examController.js`
 * **Implementation:**
   * `POST /api/exams/attempts/:attemptId/telemetry`:
@@ -147,27 +270,27 @@ sessionToken: {
     * Inserts record into `MalpracticeLog` collection.
     * Increments `attempt.violationCount`.
     * If `quiz.proctoringSettings.autoSubmitOnMaxViolations` enabled and `violationCount >= maxViolationsAllowed`:
-      * Terminates attempt with `status: 'terminated-malpractice'`, `submissionReason: 'proctor-terminated'`.
+      * Terminates attempt via `evaluateAndFinalizeAttempt(attemptId, { submissionReason: 'proctor-terminated' })`.
       * Automatically evaluates answers saved so far.
     * Returns `{ logged: true, violationCount }`.
   * `POST /api/exams/attempts/:attemptId/submit`:
     * Protected by `verifyExamSession`.
     * Timer Enforcement:
-      * `examExpiresAt = attempt.startTime.getTime() + (quiz.duration * 60 * 1000)`.
-      * If `Date.now() > examExpiresAt + 60_000` (beyond 60s grace):
-        * Marks `submissionReason = 'timer-expiry'`.
+      * `examExpiresAt = calculateExamExpiry(attempt.startTime, quiz.duration, quiz.endTime)`.
+      * If `Date.now() > examExpiresAt.getTime() + 60_000` (beyond 60s grace):
+        * Calls `evaluateAndFinalizeAttempt(attemptId, { submissionReason: 'timer-expiry', finalizedAt: new Date(examExpiresAt.getTime() + 60_000) })`.
       * Else:
-        * Marks `submissionReason = 'student-submit'`.
-    * Automatic Objective Evaluation:
-      * Fetches all assigned questions with `.select('+correctOptionId')`.
+        * Calls `evaluateAndFinalizeAttempt(attemptId, { submissionReason: 'student-submit', finalizedAt: new Date() })`.
+    * Reusable Evaluation Engine (`evaluateAndFinalizeAttempt`):
+      * Fetches assigned questions with `.select('+correctOptionId')`.
       * Evaluates each entry in `attempt.submittedAnswers` against `correctOptionId`:
         * If `selectedOptionId === question.correctOptionId`: `isCorrect = true`, `marksAwarded = question.marks`.
         * Else: `isCorrect = false`, `marksAwarded = 0`.
-      * Missing/unanswered questions are evaluated as `isCorrect = false, marksAwarded = 0`.
+      * Missing/unanswered questions: `isCorrect = false, marksAwarded = 0`.
       * Calculates `score = sum(marksAwarded)`.
       * Calculates `percentage = Math.round((score / totalMarksPossible) * 100)`.
-    * Sets `attempt.status = 'completed'` and `attempt.submittedAt = new Date()`.
-    * Saves attempt to database.
+      * Sets `attempt.status = 'completed'`, `attempt.submittedAt`, `attempt.sessionTokenHash = null`.
+      * Saves attempt atomically with concurrency guard.
     * Generates digital receipt hash: `sha256(attemptId + studentId + submittedAt)`.
     * **Student Visibility Quarantine:**
       * Returns `{ success: true, message: 'Examination completed and submitted successfully', submittedAt: attempt.submittedAt, receiptHash }`.
@@ -289,4 +412,3 @@ sessionToken: {
 - [ ] Frontend `StudentAttend.jsx` and `QuizResults.jsx` fully wired to live endpoints.
 - [ ] `npm run build` in `client` passes with zero errors.
 - [ ] Graphify refreshed.
-

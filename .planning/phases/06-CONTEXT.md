@@ -1,7 +1,7 @@
 # Phase 06: Examination Attempt Engine & Persistent Results Integration - Context
 
-**Gathered:** 2026-11-09  
-**Status:** Ready for Planning (All Core Architectural Decisions Confirmed)  
+**Gathered:** 2026-11-09
+**Status:** Ready for Planning (All Core Architectural Decisions Confirmed)
 
 <domain>
 ## Phase Boundary
@@ -66,10 +66,11 @@ Phase 6 implements the core examination attempt engine, server-authoritative pro
 ### 1. Student Verification Mechanism
 - **D-01:** Verification via USN + Registered Full Name:
   - Student inputs USN and Name on `/attend/:quizId`.
-  - Backend queries `User.findOne({ usn: normalizedUsn, role: 'student', accountStatus: 'active' })`.
-  - Verifies that `user.name.toLowerCase().trim() === inputName.toLowerCase().trim()`.
-  - Rejects with HTTP 401 if credentials do not match administrative records.
+  - Backend queries `User.findOne({ usn: normalizedUsn, role: 'student' })`.
+  - Verifies student exists, `accountStatus === 'active'`, and registered name matches input name (trim, lowercase, collapsed internal whitespace `replace(/\s+/g, ' ')`, exact full match).
+  - **Zero Enumeration Leakage:** Any validation failure (USN not found, inactive account, or name mismatch) returns the identical generic HTTP 401 response: `{ success: false, message: 'Invalid USN or student name' }`. Does not reveal whether the USN exists or the account state.
   - No student password, no student registration portal, and no student dashboard.
+  - **Pre-Window Resumption Check Order:** Verification checks for an existing `in-progress` attempt *before* checking the quiz availability window. An existing active attempt may resume within its authoritative `examExpiresAt + 60_000`, even if `quiz.endTime` has passed. New attempts are strictly barred from starting outside the `quiz.startTime` to `quiz.endTime` window.
   — **Reversibility:** costly
 
 ### 2. Result Visibility Policy
@@ -81,23 +82,27 @@ Phase 6 implements the core examination attempt engine, server-authoritative pro
 
 ### 3. Server Timer & Latency Grace Window
 - **D-03:** Strict two-tier timer enforcement:
-  - `examExpiresAt = attempt.startTime.getTime() + (quiz.duration * 60 * 1000)`.
+  - `examExpiresAt = calculateExamExpiry(attempt.startTime, quiz.duration, quiz.endTime)`.
   - If `now > examExpiresAt`: `PATCH /answers` is rejected with HTTP 403 (`"Exam time has expired; answer modifications are closed"`).
   - If `now <= examExpiresAt + 60_000` (60s grace): `POST /submit` is accepted and evaluates saved answers.
-  - If `now > examExpiresAt + 60_000`: `POST /submit` triggers automatic finalization based on previously saved answers with `submissionReason: 'timer-expiry'`.
+  - If `now > examExpiresAt + 60_000`: triggers automatic finalization based on previously saved answers with `submissionReason: 'timer-expiry'`.
+  - **Ephemeral Session Token Expiry:** The session token expires at `examExpiresAt + 60_000` (the 60s transmission grace window). It does not use arbitrary multi-minute windows.
+  - **Reusable Evaluation & Expired Attempt Finalization:** When an attempt expires (`now > examExpiresAt + 60_000`), it is never simply marked completed without scoring. A reusable server-side evaluation module (`server/src/utils/evaluationService.js`) evaluates previously saved answers against `Question.correctOptionId`, calculates `score` and `percentage`, sets `status: 'completed'`, `submissionReason: 'timer-expiry'`, `submittedAt`, and invalidates `sessionTokenHash = null`. This finalization is idempotent and concurrency-safe across Task 2 and Task 4.
   — **Reversibility:** costly
 
-### 4. Attempt Status Preservation & Schema Additions
-- **D-04:** Attempt schema safety:
+### 4. Attempt Status Preservation, Numbering & Schema Additions
+- **D-04:** Attempt schema safety & numbering:
   - Preserves existing `status` enum: `['in-progress', 'completed', 'terminated-malpractice']`.
-  - Adds optional `submissionReason` field: `['student-submit', 'timer-expiry', 'proctor-terminated']` (default `'student-submit'`).
-  - Adds optional `sessionToken` field (`select: false`) on `Attempt` for secure session tracking and invalidation upon submission.
+  - Adds optional `submissionReason` field: `['student-submit', 'timer-expiry', 'proctor-terminated']`, with `default: null`.
+  - **In-Progress Invariant:** An attempt created with `status: 'in-progress'` must **never** be initialized with `submissionReason: 'student-submit'`. `submissionReason` is set strictly when the attempt is finalized upon completion or termination.
+  - **Attempt Numbering:** When creating a new attempt, the next attempt number is calculated using `max(existing attemptNumber) + 1` rather than array length, preserving `maxAttempts` enforcement and compound-index duplicate key recovery (error code 11000).
+  - Adds `sessionTokenHash` field (`select: false`) on `Attempt` for secure session tracking and invalidation upon session refresh or submission.
   — **Reversibility:** reversible
 
 ### 5. Ephemeral Exam Session Token Architecture
 - **D-05:** Dedicated Exam Session Token:
   - Issued upon successful `/api/exams/:quizId/verify-start`.
-  - Stateless signed JWT or cryptographic token with payload: `{ attemptId, studentId, quizId, exp: examExpiresAt + 5min, type: 'exam_session' }`.
+  - Stateless signed JWT with payload: `{ attemptId, studentId, quizId, exp: Math.floor((examExpiresAt + 60_000) / 1000), type: 'exam_session' }`.
   - Middleware `verifyExamSession` checks token on `PATCH /answers`, `POST /telemetry`, and `POST /submit`.
   - Prevents students from tampering with `attemptId` or accessing other students' exam sessions.
   — **Reversibility:** one-way
@@ -118,7 +123,7 @@ Phase 6 implements the core examination attempt engine, server-authoritative pro
 - `server/src/models/User.js` — Registered student roster with USN and role.
 - `server/src/models/MalpracticeLog.js` — Telemetry event schema.
 - `server/src/utils/quizService.js` — Randomization, subset sampling, and student sanitization functions.
+- `server/src/utils/evaluationService.js` — Reusable objective evaluation and atomic attempt finalization.
 - `client/src/pages/student/StudentAttend.jsx` — Student join, attend, and submit UI.
 - `client/src/pages/faculty/QuizResults.jsx` — Faculty submissions and telemetry audit UI.
 </canonical_refs>
-
